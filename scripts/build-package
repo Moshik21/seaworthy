@@ -25,7 +25,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 INCLUDE = ["README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "SUPPORT.md", "pyproject.toml", "bin", "src", "docs",
-           "examples/profiles/electron-desktop.json", "examples/profiles/minimal.json", "examples/profiles/platform"]
+           "examples/profiles/electron-desktop.json", "examples/profiles/minimal.json", "examples/profiles/python-library.json", "examples/profiles/platform"]
 SKIP_PARTS = {"__pycache__", ".git", "dist", "build"}
 EXEC = {"bin/seaworthy"}
 

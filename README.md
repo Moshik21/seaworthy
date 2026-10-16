@@ -69,6 +69,9 @@ from the virtual environment above).
    parameters. Which example fits you:
    - `examples/profiles/minimal.json`: three free checks (source frozen, clean checkout, hosted budget). Start here for any
      project; it passes when your clean checkout is at the fetched tip of `origin/main`. Add checks as your release needs them.
+   - `examples/profiles/python-library.json`: a pure-Python library that publishes from a tag: annotated tag on the frozen
+     source, clean checkout, version in `pyproject.toml` and `CHANGELOG.md`, bounded publish workflow, budget, and the project's
+     own tests. [docs/ci-receipt.md](docs/ci-receipt.md) walks it through a CI job.
    - `examples/profiles/electron-desktop.json`: a commented example with every check type, for a signed desktop app on
      several platforms. Expect a NO-GO on a project that is not one; delete the checks that do not apply.
    - `examples/profiles/platform/seaworthy.json`: every Apple, Windows and GitHub release check once, with stand-in tools.
@@ -233,6 +236,8 @@ What is open today. The [Honesty](#honesty) section says what the tool cannot kn
 
 - Not published to a package index; install from a clone or the zip from `scripts/build-package` ([Install](#install)).
 - The platform checks have only been run against stand-in tools, not Apple's, Azure's or GitHub's real services, a real Mac, or a real Windows signing machine ([Supported platforms](#supported-platforms), [PROOF.md](examples/profiles/platform/PROOF.md)).
+- The workflow snippet in [docs/ci-receipt.md](docs/ci-receipt.md) has not run on hosted CI; the commands in it were run locally.
+- `release.version_notes` reads a JSON package file only (`package.json` shape); other formats such as `pyproject.toml` need an `external` check ([python-library.json](examples/profiles/python-library.json)).
 - Hosted CI is manual-dispatch only and runs Python 3.8 and 3.13; macOS with Python 3.8 is not in the matrix, and 3.9 to 3.12 and 3.14 have been run on Linux only ([ci.yml](.github/workflows/ci.yml)).
 - Installing with `pip` needs Python 3.9 or newer; on 3.8, run `python3 bin/seaworthy` in place ([Install](#install)).
 - `apple.notary_agreement` cannot see a pending agreement by itself; it passes only with a dated human confirmation ([docs/checks.md](docs/checks.md#applenotary_agreement-cheap-network-network)).
@@ -253,11 +258,12 @@ What is open today. The [Honesty](#honesty) section says what the tool cannot kn
 - [docs/profiles.md](docs/profiles.md): the profile format, every field, scopes, waivers, platform slots.
 - [docs/checks.md](docs/checks.md): every built-in check, its parameters, what it proves and what it cannot.
 - [docs/receipt.md](docs/receipt.md): the receipt, the dispatch gate, the retry rule, overrides, signing.
+- [docs/ci-receipt.md](docs/ci-receipt.md): running the preflight in a CI job, uploading the receipt, reading it and the exit codes.
 - [docs/budget.md](docs/budget.md): the budget ledger, rates, windows, carried spend, the usage cross-check.
 - [docs/fixtures.md](docs/fixtures.md): dry runs, fixture files, writing a known-bad case.
 - [docs/safety.md](docs/safety.md): the safety model: what is refused, what is written, exit codes.
 - [docs/troubleshooting.md](docs/troubleshooting.md): real messages and what to do about them.
-- `examples/`: a neutral example profile and `examples/profiles/platform/` (every platform
+- `examples/`: neutral example profiles (`minimal`, `python-library`, `electron-desktop`) and `examples/profiles/platform/` (every platform
   check once, with its stand-in-tool proof driver).
 - In the source repository: `scripts/self-audit` (scan for secrets and names before a release), `scripts/release-scan`
   (the self-audit plus a scan of the whole git history; see CONTRIBUTING), `scripts/build-package`

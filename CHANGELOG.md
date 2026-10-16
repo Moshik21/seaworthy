@@ -4,9 +4,13 @@ All notable changes to this project are recorded here. The format follows [Keep 
 and the project follows [Semantic Versioning](https://semver.org/). Schema versions (`seaworthy.profile`, `.report`,
 `.receipt`, `.ledger`, `.fixtures`, `.images`) are versioned separately from the tool and are all 1.0.
 
-## [Unreleased]
+## [0.1.2] - 2026-10-16
 
 ### Added
+- `examples/profiles/python-library.json`: a second example profile for a tag-driven pure-Python library (annotated tag on the frozen
+  source, clean checkout, version in `pyproject.toml` and `CHANGELOG.md` through `external` `git grep` checks, bounded publish workflow,
+  budget, the project's own tests), and `docs/ci-receipt.md`: running the preflight in a GitHub Actions job, uploading the report and
+  receipt, reading them and the exit codes, and checking the receipt in a later job. Commands tested locally; the workflow snippet has not run on hosted CI.
 - Stages: `--stage NAME` (or the profile's `stage`) says which stage of the release a run is for, a check can say where it applies
   (`stages` in the profile; a check type may declare stages it does not apply at), and a check that does not apply is reported
   `skip` ("not applicable at stage X") with the evidence it has. `apple.notary_credentials` is not applicable at `publish`: it

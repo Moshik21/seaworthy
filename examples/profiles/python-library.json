@@ -1,0 +1,49 @@
+// A pure-Python library that publishes from a tag. Run it on the release commit after you have made the annotated tag
+// locally and before you push the tag (the tag push is what starts the hosted publish job):
+//
+//   seaworthy run examples/profiles/python-library.json --repo . --sha <frozen-sha> --set version=1.4.0
+//
+// It passes when HEAD is the SHA you give, that SHA is the last-fetched tip of origin/main and carries the annotated tag
+// v<version>, the tree is clean, pyproject.toml and CHANGELOG.md both name <version>, the publish workflow is bounded, the
+// planned hosted run fits the budget, and the project's own tests pass. Change `branch`, the file names, the workflow name
+// and the test command to yours.
+//
+// The two version checks are `external` checks over `git grep` (exit 0 when the line is found, 1 when not), which read the
+// committed files and need no interpreter; the matching line is the evidence. `release.version_notes` is not used because it
+// reads a JSON package file only. In the pyproject pattern the dots of the version match any character.
+// The test command names a Python through the `python` param: `python3` here; on Windows pass `--set python=py`.
+// unittest writes to stderr, so the evidence for that check is its first output line; a runner that prints a summary
+// to stdout (pytest -q) gives a better one.
+{
+  "schema": "seaworthy.profile",
+  "schema_version": "1.0",
+  "name": "python-library",
+  "description": "A tag-driven pure-Python library release: frozen tagged source, clean tree, version and changelog agree, bounded publish workflow, budget, tests.",
+  "params": {"version": "", "python": "python3"},
+  "budget": {
+    "currency": "USD", "cap": 5.0, "max_runs": 2, "window": "all",
+    "rates": {"linux": 0.006},
+    "planned": [{"name": "publish to the package index", "os": "linux", "timeout_min": 15}]
+  },
+  "checks": [
+    {"id": "source-frozen", "check": "git.source_frozen",
+     "params": {"tag": "v${version}", "tag_required": true},
+     "rationale": "The publish job must build the commit that was proven, and the tag that starts it must be annotated and point at that commit."},
+    {"id": "clean-checkout", "check": "git.clean_checkout",
+     "rationale": "A dirty tree means the proof and the release differ."},
+    {"id": "version-in-pyproject", "check": "external",
+     "params": {"argv": ["git", "grep", "-E", "-e", "^version = \"${version}\"", "--", "pyproject.toml"]},
+     "rationale": "A tag that disagrees with pyproject.toml publishes a distribution under the wrong version, and an index never lets you replace it."},
+    {"id": "version-in-changelog", "check": "external",
+     "params": {"argv": ["git", "grep", "-F", "-e", "## [${version}]", "--", "CHANGELOG.md"]},
+     "rationale": "Release notes that skip the version being published leave users guessing what changed."},
+    {"id": "workflow-hygiene", "check": "workflow.hygiene",
+     "params": {"release_workflows": ["publish.yml"], "pin_actions": "fail"},
+     "rationale": "A hung or unpinned publish job costs minutes and trusts a moving tag."},
+    {"id": "hosted-budget", "check": "budget.hosted_spend",
+     "rationale": "A release should not start a hosted run the budget cannot cover."},
+    {"id": "tests-pass", "check": "external", "cost": "local-heavy",
+     "params": {"argv": ["${python}", "-m", "unittest", "discover", "-v", "-s", "tests"]},
+     "rationale": "Publishing a version whose tests fail cannot be undone."}
+  ]
+}

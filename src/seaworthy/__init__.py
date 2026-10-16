@@ -2,7 +2,7 @@
 
 Standard library only. The command line is `bin/seaworthy`; this package is its engine.
 """
-VERSION = "0.1.1"
+VERSION = "0.1.2"
 PROFILE_SCHEMA = ("seaworthy.profile", "1.0")
 REPORT_SCHEMA = ("seaworthy.report", "1.0")
 RECEIPT_SCHEMA = ("seaworthy.receipt", "1.0")
