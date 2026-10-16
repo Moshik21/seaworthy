@@ -11,11 +11,15 @@ Runs scripts/self-audit first and refuses to package on any finding. The zip hol
 package, docs, generic example profiles and the demo fixtures, licence and community files) under one top-level
 folder, so it unzips cleanly on Windows, macOS and Linux. It never includes project-specific profiles,
 scripts, state, or anything ignored by git. The Windows launcher is written with CRLF line endings and the POSIX
-launcher is marked executable. The archive carries the distribution name `seaworthy-release` (the name
+launcher is marked executable. Every entry carries one fixed time, so the same commit gives the same bytes in any clone:
+SOURCE_DATE_EPOCH when set, else the commit time of HEAD, else (not a git checkout, e.g. an unzipped source tree) 1980-01-01;
+the build prints the stamp. The archive carries the distribution name `seaworthy-release` (the name
 the project will have on the Python Package Index, where plain `seaworthy` is taken); the command and the import name stay
-`seaworthy`. Standard library only; the same input gives the same bytes.
+`seaworthy`. Standard library only.
 """
 import argparse
+import functools
+import os
 import re
 import subprocess
 import sys
@@ -34,6 +38,20 @@ def version():
     return re.search(r'VERSION = "([^"]+)"', (ROOT / "src" / "seaworthy" / "__init__.py").read_text()).group(1)
 
 
+@functools.lru_cache(maxsize=None)
+def stamp_epoch():
+    """The one time every zip entry carries: not the working tree's mtimes, which differ between clones of the same commit."""
+    if os.environ.get("SOURCE_DATE_EPOCH", "").strip():
+        return int(os.environ["SOURCE_DATE_EPOCH"])
+    try:
+        git = lambda *a: subprocess.run(["git", "-C", str(ROOT), *a], capture_output=True, text=True, check=True).stdout.strip()
+        if Path(git("rev-parse", "--show-toplevel")).resolve() == ROOT:  # ROOT itself is the checkout, not a folder inside another repo
+            return int(git("log", "-1", "--format=%ct", "HEAD"))
+    except (OSError, ValueError, subprocess.CalledProcessError):
+        pass
+    return 315532800  # 1980-01-01, the earliest time a zip entry can hold
+
+
 def files():
     out = []
     for item in INCLUDE:
@@ -41,7 +59,7 @@ def files():
         if path.is_file():
             out.append(path)
         else:
-            out += [p for p in sorted(path.rglob("*")) if p.is_file() and not (SKIP_PARTS & set(p.relative_to(ROOT).parts)) and p.suffix != ".pyc"
+            out += [p for p in sorted(path.rglob("*"), key=lambda p: p.as_posix()) if p.is_file() and not (SKIP_PARTS & set(p.relative_to(ROOT).parts)) and p.suffix != ".pyc"
                 and not any(part.endswith(".egg-info") for part in p.relative_to(ROOT).parts)]
     return out
 
@@ -71,7 +89,8 @@ def main():
     out_dir.mkdir(parents=True, exist_ok=True)
     target = out_dir / ("%s.zip" % top)
     members = files()
-    stamp = time.gmtime(max(p.stat().st_mtime for p in members))[:6]
+    stamp = time.gmtime(max(stamp_epoch(), 315532800))[:6]
+    print("entry time " + time.strftime("%Y-%m-%d %H:%M:%SZ", time.gmtime(max(stamp_epoch(), 315532800))))
     with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
         for path in members:
             rel = path.relative_to(ROOT).as_posix()
@@ -80,6 +99,7 @@ def main():
                 data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
             info = zipfile.ZipInfo("%s/%s" % (top, rel), date_time=stamp)
             info.compress_type = zipfile.ZIP_DEFLATED
+            info.create_system = 3  # as on Unix, whatever system builds it: the default would differ on Windows
             info.external_attr = (0o755 if rel in EXEC else 0o644) << 16
             zf.writestr(info, data)
     print("%s (%d KiB, %d files)" % (target, target.stat().st_size // 1024, len(members)))
