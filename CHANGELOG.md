@@ -30,6 +30,10 @@ and the project follows [Semantic Versioning](https://semver.org/). Schema versi
 ### Fixed
 - `scripts/merged-check` removes read-only git files when it cleans its scratch clone, so `scripts/smoke` passes on Windows.
 
+## [0.1.1] - 2026-10-16
+
+Package page metadata (project URLs, classifiers, keywords); no behavior change.
+
 ## [0.1.0] - 2026-10-16
 
 First release: the engine, the money checks, the platform checks and the dispatch gate.
