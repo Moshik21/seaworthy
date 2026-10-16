@@ -215,8 +215,9 @@ Every claim below can be checked in the file named beside it.
 | Platform | Python | Status |
 | --- | --- | --- |
 | Ubuntu / WSL2 | 3.8, 3.9, 3.10, 3.11, 3.12, 3.13, 3.14 | run: demo, smoke, self-audit (the platform proof on 3.11 and 3.14) |
-| macOS (Apple Silicon) | 3.8+ | designed for; not yet run: the smoke script is the first thing to run there |
-| Windows 11 (native; NT 10.0.26300, PowerShell 5.1, Python 3.12.10) | 3.8+ | run: install, `seaworthy demo`, the quickstart and `gate`. `python scripts\smoke` runs from a git clone, not from the zip (the zip has no `scripts/`); its `merged-check` step failed on read-only git files until the scratch cleanup was fixed, and a scratch copy with that fix passed 38 of 38 steps. The released tree's smoke has not been re-run on Windows since |
+| macOS (Apple Silicon) | 3.13 | run on a hosted macOS 15 image (2026-10-16): smoke, demo, self-audit. Python 3.8 is not in the matrix (no Apple Silicon build). Not run on a developer's own Mac |
+| Windows 11 (native; NT 10.0.26300, PowerShell 5.1, Python 3.12.10) | 3.8+ | run: install, `seaworthy demo`, the quickstart and `gate`. `python scripts\smoke` runs from a git clone, not from the zip (the zip has no `scripts/`) |
+| Windows Server 2022 (hosted image) | 3.8, 3.13 | run on a hosted windows-2022 image (2026-10-16): smoke, demo, self-audit |
 
 The platform checks are proven on Linux against stand-in `xcrun`, `security`, `spctl`, `gh` and `ssh` programs
 ([examples/profiles/platform/PROOF.md](examples/profiles/platform/PROOF.md)); they have **not** yet been run against Apple's,
@@ -225,6 +226,17 @@ Azure's or GitHub's real services, on a real Mac, or on a real Windows signing m
 Python 3.8 is the floor: no later standard-library API is used. `scripts/smoke`, `seaworthy demo` and `scripts/self-audit`
 pass on Linux on Python 3.8, 3.9, 3.10, 3.11, 3.12, 3.13 and 3.14. The table says what was *actually* run; it will be
 updated as the other rows are.
+
+## Known issues
+
+What is open today. The [Honesty](#honesty) section says what the tool cannot know; this list is what has not been done yet.
+
+- Not published to a package index; install from a clone or the zip from `scripts/build-package` ([Install](#install)).
+- The platform checks have only been run against stand-in tools, not Apple's, Azure's or GitHub's real services, a real Mac, or a real Windows signing machine ([Supported platforms](#supported-platforms), [PROOF.md](examples/profiles/platform/PROOF.md)).
+- Hosted CI is manual-dispatch only and runs Python 3.8 and 3.13; macOS with Python 3.8 is not in the matrix, and 3.9 to 3.12 and 3.14 have been run on Linux only ([ci.yml](.github/workflows/ci.yml)).
+- Installing with `pip` needs Python 3.9 or newer; on 3.8, run `python3 bin/seaworthy` in place ([Install](#install)).
+- `apple.notary_agreement` cannot see a pending agreement by itself; it passes only with a dated human confirmation ([docs/checks.md](docs/checks.md#applenotary_agreement-cheap-network-network)).
+- Three vendor details (notarytool's JSON output and `@env:` password reference, and the shape of GitHub's immutable-releases answer) come from documentation as read and have not been confirmed with a real call ([CHANGELOG](CHANGELOG.md)).
 
 ## Resource budgets (measured)
 
