@@ -1,0 +1,208 @@
+#!/usr/bin/env python3
+"""Merged-result check: does the tree that a merge would produce still pass the repository's own gates?
+
+    scripts/merged-check [--head REF_OR_SHA] [--base origin/main] [--pr N] [--denylist FILE] [--audit-only]
+
+Two branches can each pass every check on their own base and still fail once both are merged (a wording one allows,
+a rename the other makes). With no hosted CI, nothing else looks at the merged result, so run this right before a
+merge, and again if the base moved.
+
+It resolves the base (and runs `git fetch <remote> <branch>` first when the base is a remote branch such as
+origin/main), makes a scratch clone OUTSIDE the repository tree, merges the head onto the base there without
+committing, and runs in that merged tree:
+
+    python3 -I scripts/self-audit [--denylist FILE]     (the denylist: --denylist, else $MERGED_CHECK_DENYLIST)
+    python3 scripts/smoke
+    python3 bin/seaworthy demo
+
+--audit-only runs only the self-audit (for a scratch repository that has no suite). --head defaults to HEAD; --pr N
+takes the head of that pull request from `gh pr view` (and fetches it from origin when it is not here yet). The
+caller's working tree, index and branches are never touched; the scratch clone is removed on every exit.
+
+Prints one verdict line, the last line of output: `merged-check: ok` or `merged-check: FAILED <step>: <first finding>`
+(the output of the failing step goes to stderr above it). Exit status 0 when ok, 1 when a step fails (merge conflict,
+self-audit, suite), 2 when the check could not run (bad ref, failed fetch, gh unavailable). Standard library only;
+the only network use is `git fetch`, and `gh` for --pr.
+"""
+import argparse
+import os
+import re
+import shutil
+import signal
+import stat
+import subprocess
+import sys
+import tempfile
+
+AUDIT_LINE = re.compile(r"^(.+?:\d+: .+?): ")
+STEP_TIMEOUT = 1800
+
+
+class Stop(Exception):
+    def __init__(self, step, finding, code, log=""):
+        Exception.__init__(self, finding)
+        self.step, self.finding, self.code, self.log = step, finding, code, log
+
+
+def run(argv, cwd=None, env=None, timeout=None):
+    try:
+        r = subprocess.run(argv, cwd=cwd, env=env, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True,
+                           encoding="utf-8", errors="replace", timeout=timeout)
+    except OSError as err:
+        return 127, str(err)
+    except subprocess.TimeoutExpired:
+        return 124, "timed out after %d seconds" % timeout
+    return r.returncode, r.stdout
+
+
+def git(cwd, *args):
+    return run(["git", "-C", cwd] + list(args))
+
+
+def first_line(text, default):
+    lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+    return lines[0] if lines else default
+
+
+def resolve(root, ref, step):
+    rc, out = git(root, "rev-parse", "--verify", "--quiet", ref + "^{commit}")
+    if rc != 0:
+        raise Stop(step, "cannot resolve %s to a commit" % ref, 2)
+    return out.strip()
+
+
+def fetch_base(root, base):
+    """`git fetch <remote> <branch>` when the base names a remote branch; a plain ref or SHA needs no fetch."""
+    remote, _, branch = base.partition("/")
+    rc, out = git(root, "remote")
+    if not branch or remote not in out.split():
+        return
+    rc, out = git(root, "fetch", "--quiet", remote, branch)
+    if rc != 0:
+        raise Stop("fetch", "git fetch %s %s failed: %s" % (remote, branch, first_line(out, "no output")), 2, out)
+
+
+def pr_head(root, number):
+    if shutil.which("gh") is None:
+        raise Stop("pr", "gh is not available here; pass --head instead of --pr", 2)
+    rc, out = run(["gh", "pr", "view", str(number), "--json", "headRefOid", "--jq", ".headRefOid"], cwd=root)
+    sha = out.strip()
+    if rc != 0 or not re.match(r"^[0-9a-f]{40}$", sha):
+        raise Stop("pr", "gh pr view %s failed: %s" % (number, first_line(out, "no output")), 2, out)
+    if git(root, "cat-file", "-e", sha + "^{commit}")[0] != 0:
+        rc, out = git(root, "fetch", "--quiet", "origin", "pull/%s/head" % number)
+        if rc != 0:
+            raise Stop("fetch", "git fetch origin pull/%s/head failed: %s" % (number, first_line(out, "no output")), 2, out)
+    return sha
+
+
+def merge(tree, head):
+    env = dict(os.environ, GIT_AUTHOR_NAME="merged-check", GIT_AUTHOR_EMAIL="merged-check@example.invalid",
+               GIT_COMMITTER_NAME="merged-check", GIT_COMMITTER_EMAIL="merged-check@example.invalid")
+    rc, out = run(["git", "-C", tree, "merge", "--no-commit", "--no-ff", "--no-edit", head], env=env)
+    if rc == 0:
+        return
+    rc2, files = git(tree, "diff", "--name-only", "--diff-filter=U")
+    conflicted = files.split() if rc2 == 0 else []
+    if conflicted:
+        raise Stop("merge", "conflict in %s" % ", ".join(conflicted), 1, out)
+    raise Stop("merge", first_line(out, "git merge failed"), 1, out)
+
+
+def steps(args):
+    audit = [sys.executable, "-I", "scripts/self-audit"]
+    denylist = args.denylist or os.environ.get("MERGED_CHECK_DENYLIST")
+    if denylist:
+        audit += ["--denylist", os.path.abspath(denylist)]
+    found = [("self-audit", audit)]
+    if not args.audit_only:
+        found += [("smoke", [sys.executable, "scripts/smoke"]), ("demo", [sys.executable, "bin/seaworthy", "demo"])]
+    return found
+
+
+def finding_of(step, out, rc):
+    lines = [ln.strip() for ln in out.splitlines() if ln.strip()]
+    if step == "self-audit":
+        for ln in lines:
+            m = AUDIT_LINE.match(ln)
+            if m:  # file, line and kind only: the matching content is not repeated into a pasted verdict
+                return m.group(1)
+    else:
+        for ln in lines:
+            if ln.startswith("FAIL") or " FAIL " in ln:
+                return ln
+    return lines[-1] if lines else "exit %d with no output" % rc
+
+
+def check(args, root, scratch):
+    base_ref = args.base
+    if args.pr is not None:
+        head = pr_head(root, args.pr)
+    else:
+        head = resolve(root, args.head, "head")
+    fetch_base(root, base_ref)
+    base = resolve(root, base_ref, "base")
+    head = resolve(root, head, "head")
+    tree = os.path.join(scratch, "merged")
+    # --shared borrows the caller's objects, so any local commit (pushed or not) is reachable by SHA; nothing is written back.
+    rc, out = run(["git", "clone", "--quiet", "--shared", "--no-checkout", root, tree])
+    if rc != 0:
+        raise Stop("setup", "scratch clone failed: %s" % first_line(out, "no output"), 2, out)
+    rc, out = git(tree, "checkout", "--quiet", "--detach", base)
+    if rc != 0:
+        raise Stop("setup", "cannot check out the base %s: %s" % (base[:12], first_line(out, "no output")), 2, out)
+    sys.stderr.write("merged-check: merging %s onto %s\n" % (head[:12], base[:12]))
+    merge(tree, head)
+    env = {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+    for step, argv in steps(args):
+        rc, out = run(argv, cwd=tree, env=env, timeout=STEP_TIMEOUT)
+        if rc != 0:
+            raise Stop(step, finding_of(step, out, rc), 1, out)
+
+
+def _remove_readonly(func, path, _exc_info):
+    # git writes its object and pack files read-only; Windows refuses to delete those until they are made writable.
+    try:
+        os.chmod(path, stat.S_IWRITE)
+        func(path)
+    except OSError:
+        pass
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--head", default="HEAD", help="ref or SHA to merge (default: HEAD)")
+    ap.add_argument("--base", default="origin/main", help="ref or SHA to merge onto (default: origin/main)")
+    ap.add_argument("--pr", type=int, help="take the head from this pull request, via gh")
+    ap.add_argument("--denylist", help="file of names for the self-audit (default: $MERGED_CHECK_DENYLIST)")
+    ap.add_argument("--audit-only", action="store_true", help="run only the self-audit, not the suite")
+    args = ap.parse_args()
+    signal.signal(signal.SIGTERM, lambda *_: sys.exit(143))
+    scratch = None
+    try:
+        rc, out = run(["git", "rev-parse", "--show-toplevel"])
+        if rc != 0:
+            raise Stop("setup", "not inside a git repository", 2)
+        root = out.strip()
+        if args.pr is not None and args.head != "HEAD":
+            raise Stop("setup", "give --head or --pr, not both", 2)
+        dirty = git(root, "status", "--porcelain")[1].strip()
+        if dirty:
+            sys.stderr.write("merged-check: uncommitted changes here are not part of the merge; only commits are checked\n")
+        scratch = tempfile.mkdtemp(prefix="merged-check-")
+        check(args, root, scratch)
+    except Stop as stop:
+        if stop.log.strip():
+            sys.stderr.write(stop.log if stop.log.endswith("\n") else stop.log + "\n")
+        print("merged-check: FAILED %s: %s" % (stop.step, stop.finding))
+        return stop.code
+    finally:
+        if scratch:
+            # `onerror` is deprecated from Python 3.12 (its replacement `onexc` has the same handler signature)
+            shutil.rmtree(scratch, **{"onexc" if sys.version_info >= (3, 12) else "onerror": _remove_readonly})
+    print("merged-check: ok")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

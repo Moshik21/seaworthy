@@ -1,0 +1,90 @@
+#!/usr/bin/env python3
+"""Build the distributable archive: dist/seaworthy-release-<version>.zip
+
+    python3 scripts/build-package [--denylist FILE] [--out DIR]
+    python3 scripts/build-package --no-denylist     (the same as giving no --denylist, said out loud)
+
+With no denylist the self-audit still looks for secrets, e-mail addresses, home paths and IP addresses, and says plainly
+that your names were not checked; give --denylist FILE (kept outside the repository) to check those too.
+
+Runs scripts/self-audit first and refuses to package on any finding. The zip holds only the product (command,
+package, docs, generic example profiles and the demo fixtures, licence and community files) under one top-level
+folder, so it unzips cleanly on Windows, macOS and Linux. It never includes project-specific profiles,
+scripts, state, or anything ignored by git. The Windows launcher is written with CRLF line endings and the POSIX
+launcher is marked executable. The archive carries the distribution name `seaworthy-release` (the name
+the project will have on the Python Package Index, where plain `seaworthy` is taken); the command and the import name stay
+`seaworthy`. Standard library only; the same input gives the same bytes.
+"""
+import argparse
+import re
+import subprocess
+import sys
+import time
+import zipfile
+from pathlib import Path
+
+ROOT = Path(__file__).resolve().parents[1]
+INCLUDE = ["README.md", "LICENSE", "CHANGELOG.md", "CONTRIBUTING.md", "SECURITY.md", "CODE_OF_CONDUCT.md", "SUPPORT.md", "pyproject.toml", "bin", "src", "docs",
+           "examples/profiles/electron-desktop.json", "examples/profiles/minimal.json", "examples/profiles/platform"]
+SKIP_PARTS = {"__pycache__", ".git", "dist", "build"}
+EXEC = {"bin/seaworthy"}
+
+
+def version():
+    return re.search(r'VERSION = "([^"]+)"', (ROOT / "src" / "seaworthy" / "__init__.py").read_text()).group(1)
+
+
+def files():
+    out = []
+    for item in INCLUDE:
+        path = ROOT / item
+        if path.is_file():
+            out.append(path)
+        else:
+            out += [p for p in sorted(path.rglob("*")) if p.is_file() and not (SKIP_PARTS & set(p.relative_to(ROOT).parts)) and p.suffix != ".pyc"
+                and not any(part.endswith(".egg-info") for part in p.relative_to(ROOT).parts)]
+    return out
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("--out", default=str(ROOT / "dist"))
+    ap.add_argument("--denylist", help="file of names that must not appear in the product (kept outside the repository)")
+    ap.add_argument("--no-denylist", action="store_true", help="audit without a denylist (secrets, e-mails, paths and IPs only)")
+    args = ap.parse_args()
+    if args.denylist and args.no_denylist:
+        print("build-package: --denylist FILE and --no-denylist contradict each other; give one", file=sys.stderr)
+        return 2
+    if not args.denylist:
+        print("build-package: no --denylist FILE given, so your own names (hosts, accounts, projects) are NOT checked; the audit "
+              "covers secrets, e-mails, home paths and IP addresses only.", file=sys.stderr)
+    audit = [sys.executable, str(ROOT / "scripts" / "self-audit")] + (["--denylist", args.denylist] if args.denylist else [])
+    result = subprocess.run(audit)
+    if result.returncode != 0:
+        print("build-package: self-audit found problems; nothing was packaged%s" % (
+            "" if args.denylist else " (audited without a denylist, as --no-denylist does; add --denylist FILE to check your names too)"),
+            file=sys.stderr)
+        return 1
+    ver = version()
+    top = "seaworthy-release-%s" % ver
+    out_dir = Path(args.out)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    target = out_dir / ("%s.zip" % top)
+    members = files()
+    stamp = time.gmtime(max(p.stat().st_mtime for p in members))[:6]
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as zf:
+        for path in members:
+            rel = path.relative_to(ROOT).as_posix()
+            data = path.read_bytes()
+            if rel.endswith(".cmd"):
+                data = data.replace(b"\r\n", b"\n").replace(b"\n", b"\r\n")
+            info = zipfile.ZipInfo("%s/%s" % (top, rel), date_time=stamp)
+            info.compress_type = zipfile.ZIP_DEFLATED
+            info.external_attr = (0o755 if rel in EXEC else 0o644) << 16
+            zf.writestr(info, data)
+    print("%s (%d KiB, %d files)" % (target, target.stat().st_size // 1024, len(members)))
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

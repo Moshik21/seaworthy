@@ -1,0 +1,18 @@
+[
+ {
+  "tag_name": "ubuntu24/20260901.1",
+  "name": "image 20260901.1"
+ },
+ {
+  "tag_name": "win22/20260908.1",
+  "name": "image 20260908.1"
+ },
+ {
+  "tag_name": "win25/20260908.1",
+  "name": "image 20260908.1"
+ },
+ {
+  "tag_name": "ubuntu22/20260825.1",
+  "name": "image 20260825.1"
+ }
+]

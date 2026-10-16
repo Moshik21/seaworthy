@@ -1,0 +1,50 @@
+// The profile `seaworthy demo` runs against a synthetic project. It is a small, complete example of the format:
+// free checks that run for real on any machine, and "remote" checks (a build host, GitHub) that a dry run answers
+// from recorded fixtures. Scope "remote" lets a real run cover only what can run without leaving the machine.
+{
+  "schema": "seaworthy.profile",
+  "schema_version": "1.0",
+  "name": "demo",
+  "description": "Synthetic project used by `seaworthy demo`.",
+  "params": {"version": "1.2.3", "usage_api": "off"},
+  "hosts": {"builder": {"os": "windows", "argv_prefix": ["ssh", "-o", "BatchMode=yes", "builder-alias"]}},
+  "budget": {
+    "currency": "USD", "cap": 5.0, "max_runs": 2, "window": "all",
+    "planned": [{"name": "linux release", "os": "linux", "timeout_min": 60}, {"name": "windows release", "os": "windows", "timeout_min": 120}]
+  },
+  "receipt": {"max_age_hours": 12},
+  "deterministic_failures": [{"id": "heap-oom", "pattern": "heap out of memory", "why": "the same SHA hits the same limit"}],
+  "checks": [
+    {"id": "source-frozen", "check": "git.source_frozen", "params": {"tag": "v${version}"},
+     "rationale": "The hosted run must build the SHA that was proven."},
+    {"id": "clean-checkout", "check": "git.clean_checkout", "rationale": "A dirty tree means the proof and the release differ."},
+    {"id": "version-and-notes", "check": "release.version_notes",
+     "params": {"version": "${version}", "notes": "docs/RELEASE_NOTES_{X_Y_Z}.md"},
+     "rationale": "A forgotten bump or notes file is found only after minutes are spent."},
+    {"id": "workflow-hygiene", "check": "workflow.hygiene", "params": {"release_workflows": ["release.yml"], "ref": "v${version}", "max_timeout": {"linux": 90, "windows": 180}},
+     "rationale": "An unbounded paid job can run 360 minutes."},
+    {"id": "tool-pins-local", "check": "tools.pins",
+     "params": {"tools": [{"name": "git", "argv": ["git", "--version"], "min": "2.0"}]},
+     "rationale": "The proof must run on the pinned toolchain."},
+    {"id": "hosted-budget", "check": "budget.hosted_spend", "waivable": true,
+     "params": {"usage_api": "${usage_api}", "usage_user": "demo-owner"},
+     "rationale": "The budget is for releases only; a failed run is not re-run to retry."},
+
+    {"id": "tool-pins-builder", "check": "tools.pins", "host": "builder", "cost": "cheap-network", "scope": "remote",
+     "params": {"tools": [{"name": "node", "argv": ["node", "--version"], "expect": "24.*"}]},
+     "rationale": "The build host's tools must match the pins."},
+    {"id": "builder-reachable", "check": "hosts.reachable", "cost": "cheap-network", "scope": "remote",
+     "params": {"host": "builder", "timeout_s": 5},
+     "rationale": "An unreachable build host forces the paid path."},
+    {"id": "runner-image-drift", "check": "github.runner_image", "cost": "cheap-network", "scope": "remote", "required": false,
+     "advisory_reason": "A changed image is a signal to read the image notes, not proof the release will fail; images are rebuilt weekly, so blocking on every change would block every release.",
+     "params": {"mode": "drift"}, "rationale": "Pinned labels still move."},
+    {"id": "runner-image-migration", "check": "github.runner_image", "cost": "cheap-network", "scope": "remote",
+     "params": {"mode": "migration"}, "rationale": "A label under a migration announcement changes the toolchain."},
+    {"id": "ordinary-ci-disabled", "check": "github.workflows_disabled", "cost": "cheap-network", "scope": "remote", "required": true,
+     "params": {"repo": "demo-owner/demo-app", "files": ["ci.yml"]}, "rationale": "Ordinary CI would spend the release-only budget."},
+
+    {"id": "notary-agreement", "check": "apple.notary_agreement", "enabled": false, "scope": "mac", "waivable": true,
+     "rationale": "Reserved slot for the platform checks of a later release."}
+  ]
+}

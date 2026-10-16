@@ -1,0 +1,355 @@
+#!/usr/bin/env python3
+"""Three-OS smoke test: does the installed product start, run one check, print JSON and use the right exit codes?
+
+    python3 scripts/smoke
+
+Runs only through the public command line, on a throwaway git repository, with no network. Exits 0 when every step
+behaves as stated; prints one line per step. Meant to be run on macOS, Windows and Linux (and WSL) before a release.
+"""
+import json
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+
+ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+SCAN = os.path.join(ROOT, "scripts", "release-scan")
+MERGED = os.path.join(ROOT, "scripts", "merged-check")
+BIN = os.path.join(ROOT, "bin", "seaworthy")
+PROFILE = {
+    "schema": "seaworthy.profile", "schema_version": "1.0", "name": "smoke",
+    "checks": [{"id": "clean", "check": "git.clean_checkout", "rationale": "smoke"}],
+}
+
+
+def cli(*args):
+    r = subprocess.run([sys.executable, BIN] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    return r.returncode, r.stdout, r.stderr
+
+
+def release_scan(tmp, env, step):
+    """scripts/release-scan on a scratch repository: clean, then with synthetic hits on a side branch and in a denylisted file."""
+    repo = os.path.join(tmp, "scan-repo")
+    os.makedirs(repo)
+
+    def git(*args, **extra):
+        subprocess.run(["git"] + list(args), cwd=repo, env=dict(env, **extra), check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+
+    def scan(*args):
+        r = subprocess.run([sys.executable, SCAN, repo] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return r.returncode, r.stdout + r.stderr
+
+    token = "ghp" + "_" + "A1b2C3d4" * 4  # synthetic, built in pieces so this script passes its own audit
+    home = "/ho" + "me/jdoe/"
+    allow = ["--allow", "Smoke", "--allow", "smoke@example.invalid"]
+    git("init", "-q")
+    git("commit", "-q", "--allow-empty", "-m", "start")
+    rc, out = scan(*allow)
+    step("release-scan: a clean scratch repository (exit 0)", rc == 0 and "clean" in out, "exit %s" % rc)
+    rc, out = scan()
+    step("release-scan: no --allow makes every identity a finding (exit 1)", rc == 1 and "author name" in out, "exit %s" % rc)
+    git("checkout", "-q", "-b", "side")
+    with open(os.path.join(repo, "leak.txt"), "w") as fh:
+        fh.write("token = %s\npath = %s\nwordlist: Zebrafish\n" % (token, home))
+    git("add", "leak.txt")
+    git("commit", "-q", "-m", "synthetic hits", GIT_AUTHOR_NAME="Intruder", GIT_AUTHOR_EMAIL="intruder@example.invalid")
+    git("rm", "-q", "leak.txt")
+    git("commit", "-q", "-m", "remove them again")
+    git("checkout", "-q", "-")
+    denylist = os.path.join(tmp, "scan-denylist.txt")
+    with open(denylist, "w") as fh:
+        fh.write("Zebrafish\n")
+    rc, out = scan(*allow)
+    step("release-scan: hits only on a side branch, gone from the tree, are found (exit 1)", rc == 1, "exit %s" % rc)
+    step("release-scan: names the kinds and counts", all(k in out for k in ("github token: 1 in 1", "Linux home path: 1 in 1", "author name not on the allow list: 1 in 1", "author e-mail not on the allow list: 1 in 1")), out.strip())
+    step("release-scan: never prints the content", not any(c in out for c in (token, home, "Intruder", "intruder@")), "content leaked into the report")
+    git("checkout", "-q", "side~1")
+    rc, out = scan(*allow, "--denylist", denylist)
+    step("release-scan: --denylist reaches the tree scan (exit 1)", rc == 1 and "denylisted name: 1" in out and "Zebrafish" not in out, out.strip())
+    rc, _ = scan(*allow, "--denylist", os.path.join(tmp, "missing.txt"))
+    step("release-scan: a missing denylist is an error, not a clean scan (exit 2)", rc == 2, "exit %s" % rc)
+
+    merge_repo = os.path.join(tmp, "scan-merge-repo")
+    os.makedirs(merge_repo)
+
+    def mgit(*args, check=True):
+        return subprocess.run(["git"] + list(args), cwd=merge_repo, env=env, check=check, stdout=subprocess.PIPE, stderr=subprocess.PIPE).returncode
+
+    def mscan():
+        r = subprocess.run([sys.executable, SCAN, merge_repo] + allow, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return r.returncode, r.stdout + r.stderr
+
+    key = "sk" + "-" + "Z9y8X7w6" * 4  # synthetic, built in pieces like the token above
+    conf = os.path.join(merge_repo, "conf.txt")
+    mgit("init", "-q")
+    with open(conf, "w") as fh:
+        fh.write("value = 1\n")
+    mgit("add", "conf.txt")
+    mgit("commit", "-q", "-m", "base")
+    mgit("checkout", "-q", "-b", "theirs")
+    with open(conf, "w") as fh:
+        fh.write("value = 3\n")
+    mgit("commit", "-q", "-am", "theirs")
+    mgit("checkout", "-q", "-")
+    with open(conf, "w") as fh:
+        fh.write("value = 2\n")
+    mgit("commit", "-q", "-am", "ours")
+    rc, out = mscan()
+    step("release-scan: diverged branches before the merge are clean (exit 0)", rc == 0, out.strip())
+    conflicted = mgit("merge", "-q", "theirs", check=False) != 0
+    with open(conf, "w") as fh:
+        fh.write("value = %s\n" % key)
+    mgit("add", "conf.txt")
+    mgit("commit", "-q", "--no-edit")
+    rc, out = mscan()
+    step("release-scan: a token added only by a conflict resolution is found (exit 1)", conflicted and rc == 1 and "added line, api key:" in out and "in 1 commit(s)" in out, out.strip())
+    step("release-scan: never prints the merge-added content", key not in out, "content leaked into the report")
+
+
+def self_audit(tmp, step):
+    """scripts/self-audit on a scratch directory: repeatable --denylist, and the script is scanned like any other file."""
+    audit = os.path.join(ROOT, "scripts", "self-audit")
+    tree = os.path.join(tmp, "audit-tree")
+    os.makedirs(os.path.join(tree, "extras"))
+    lists = []
+    for name, word in (("one", "Zebrafish"), ("two", "Narwhal")):
+        lists.append(os.path.join(tmp, "audit-%s.txt" % name))
+        with open(lists[-1], "w") as fh:
+            fh.write(word + "\n")
+
+    def audit_run(*args):
+        r = subprocess.run([sys.executable, "-I", audit, tree] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return r.returncode, r.stdout + r.stderr
+
+    flags = [f for path in lists for f in ("--denylist", path)]
+    with open(os.path.join(tree, "notes.txt"), "w") as fh:
+        fh.write("nothing here\n")
+    rc, out = audit_run(*flags)
+    step("self-audit: two --denylist files, a clean tree (exit 0)", rc == 0 and "clean" in out, out.strip())
+    for word in ("Zebrafish", "Narwhal"):
+        with open(os.path.join(tree, "notes.txt"), "w") as fh:
+            fh.write("a %s here\n" % word.lower())
+        rc, out = audit_run(*flags)
+        step("self-audit: a word from %s is found when both files are given (exit 1)" % word, rc == 1 and "denylisted name" in out, out.strip())
+    with open(os.path.join(tree, "notes.txt"), "w") as fh:
+        fh.write("nothing here\n")
+    with open(os.path.join(tree, "extras", "tool.txt"), "w") as fh:
+        fh.write("a zebrafish here\n")
+    rc, out = audit_run(*flags)
+    step("self-audit: no directory is exempt by default, extras/ included (exit 1)", rc == 1 and "extras" in out, out.strip())
+    rc, out = audit_run(*flags, "--exempt", "extras")
+    step("self-audit: --exempt DIR still skips that directory for names (exit 0)", rc == 0, out.strip())
+    os.remove(os.path.join(tree, "extras", "tool.txt"))
+    with open(audit) as src, open(os.path.join(tree, "audit-copy"), "w") as dst:
+        dst.write(src.read() + "\n# zebrafish\n")
+    rc, out = audit_run(*flags)
+    step("self-audit: a copy of the script is scanned as data (exit 1)", rc == 1 and "audit-copy" in out, out.strip())
+    rc, out = audit_run(*flags[:2], "--denylist", os.path.join(tmp, "missing.txt"))
+    step("self-audit: a missing denylist is not a clean scan", rc != 0, out.strip())
+
+
+def merged_check(tmp, env, step):
+    """scripts/merged-check on a scratch repository: two branches that pass alone and fail merged, a conflict, a clean merge, cleanup."""
+    repo = os.path.join(tmp, "merge-repo")
+    scratch_tmp = os.path.join(tmp, "merge-tmp")
+    os.makedirs(os.path.join(repo, "scripts"))
+    os.makedirs(scratch_tmp)
+
+    def git(*args):
+        return subprocess.run(["git"] + list(args), cwd=repo, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                              universal_newlines=True).stdout
+
+    def write(name, text):
+        path = os.path.join(repo, name)
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        with open(path, "w") as fh:
+            fh.write(text)
+
+    def check(head, *extra):
+        r = subprocess.run([sys.executable, MERGED, "--audit-only", "--base", "main", "--head", head] + list(extra), cwd=repo,
+                           env=dict(env, TMPDIR=scratch_tmp), stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+        return r.returncode, r.stdout, r.stdout + r.stderr
+
+    denylist = os.path.join(tmp, "merge-denylist.txt")
+    with open(denylist, "w") as fh:
+        fh.write("Zebrafish\n")
+    git("init", "-q")
+    git("symbolic-ref", "HEAD", "refs/heads/main")
+    with open(os.path.join(ROOT, "scripts", "self-audit")) as src:  # a scratch copy that exempts one directory by default, so a name can be allowed there
+        audit_text = src.read()
+    assert "for e in (args.exempt or [])" in audit_text
+    with open(os.path.join(repo, "scripts", "self-audit"), "w") as dst:
+        dst.write(audit_text.replace("for e in (args.exempt or [])", 'for e in (args.exempt or ["extras"])'))
+    os.chmod(os.path.join(repo, "scripts", "self-audit"), 0o755)
+    write("extras/note.md", "".join("line %d of the extras note\n" % n for n in range(1, 9)))
+    write("conf.txt", "value = 1\n")
+    write("other.txt", "other = 1\n")
+    git("add", "-A")
+    git("commit", "-q", "-m", "base")
+    git("checkout", "-q", "-b", "adds-name")  # extras/ may name things, so this passes alone
+    with open(os.path.join(repo, "extras", "note.md"), "a") as fh:
+        fh.write("mentions Zebrafish here\n")
+    git("commit", "-q", "-am", "name in an extras note")
+    git("checkout", "-q", "-b", "moves-note", "main")  # the note has no name in it on this base, so moving it into the core passes alone
+    git("mv", "extras/note.md", "core-note.md")
+    git("commit", "-q", "-am", "move the note into the core")
+    git("checkout", "-q", "-b", "edits-conf-a", "main")
+    write("conf.txt", "value = 2\n")
+    git("commit", "-q", "-am", "conf a")
+    git("checkout", "-q", "-b", "edits-conf-b", "main")
+    write("conf.txt", "value = 3\n")
+    git("commit", "-q", "-am", "conf b")
+    git("checkout", "-q", "-b", "edits-other", "main")
+    write("other.txt", "other = 2\n")
+    git("commit", "-q", "-am", "unrelated edit")
+    git("checkout", "-q", "main")
+    before = git("status", "--porcelain", "--branch")
+
+    rc, out, _ = check("adds-name", "--denylist", denylist)
+    step("merged-check: the first branch alone passes (exit 0)", rc == 0 and out.strip() == "merged-check: ok", out.strip())
+    rc, out, _ = check("moves-note", "--denylist", denylist)
+    step("merged-check: the second branch alone passes (exit 0)", rc == 0 and out.strip() == "merged-check: ok", out.strip())
+    rc, out, _ = check("edits-other", "--base", "moves-note", "--denylist", denylist)
+    step("merged-check: a clean merge passes (exit 0, one verdict line)", rc == 0 and out.strip() == "merged-check: ok", out.strip())
+    rc, out, _ = check("adds-name", "--base", "moves-note", "--denylist", denylist)
+    step("merged-check: two branches clean alone, merged result fails the audit (exit 1)",
+         rc == 1 and out.strip() == "merged-check: FAILED self-audit: core-note.md:9: denylisted name", out.strip())
+    rc, out, _ = check("edits-conf-a", "--base", "edits-conf-b")
+    step("merged-check: a conflicting merge fails and lists the file (exit 1)",
+         rc == 1 and out.strip() == "merged-check: FAILED merge: conflict in conf.txt", out.strip())
+    step("merged-check: leaves no scratch tree, worktree, branch or change behind",
+         os.listdir(scratch_tmp) == [] and git("worktree", "list").count("\n") == 1 and git("status", "--porcelain", "--branch") == before,
+         "scratch: %s" % os.listdir(scratch_tmp))
+    rc, out, _ = check("no-such-ref")
+    step("merged-check: an unresolvable ref cannot run (exit 2)", rc == 2 and "FAILED head:" in out, out.strip())
+
+
+def run(argv, **kw):
+    r = subprocess.run(argv, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, **kw)
+    return r.returncode, r.stdout
+
+
+def clean_env():
+    return {k: v for k, v in os.environ.items() if k != "PYTHONPATH"}
+
+
+def wheel_demo(tmp, step):
+    """Build the wheel, install it into a fresh virtual environment and run the demo from there: what a pip user gets."""
+    if sys.version_info < (3, 9):
+        print("  skip  wheel install: building needs Python 3.9 or newer (setuptools>=77), this is %d.%d" % sys.version_info[:2])
+        return
+    src = os.path.join(tmp, "wheel-src")
+    os.makedirs(src)
+    for item in ("pyproject.toml", "README.md", "LICENSE", "src"):
+        path = os.path.join(ROOT, item)
+        if os.path.isdir(path):
+            shutil.copytree(path, os.path.join(src, item), ignore=shutil.ignore_patterns("__pycache__", "*.pyc"))
+        elif os.path.exists(path):
+            shutil.copy(path, src)
+    env = os.path.join(tmp, "wheel-venv")
+    rc, out = run([sys.executable, "-m", "venv", env])
+    if rc != 0:
+        why = next((ln for ln in out.splitlines() if "apt install" in ln or "ensurepip" in ln), out.strip()[:100])
+        print("  skip  wheel install: cannot make a virtual environment with pip here (%s)" % why.strip())
+        return
+    py = os.path.join(env, "Scripts" if os.name == "nt" else "bin", "python")
+    command = os.path.join(env, "Scripts" if os.name == "nt" else "bin", "seaworthy")
+    wheels = os.path.join(tmp, "wheels")
+    rc, out = run([py, "-m", "pip", "wheel", "--no-deps", "--quiet", "-w", wheels, src], env=clean_env())
+    built = [n for n in os.listdir(wheels)] if os.path.isdir(wheels) else []
+    step("the wheel builds", rc == 0 and len(built) == 1, out.strip().splitlines()[-1] if out.strip() else "no wheel")
+    if rc != 0 or len(built) != 1:
+        return
+    rc, out = run([py, "-m", "pip", "install", "--quiet", "--no-deps", os.path.join(wheels, built[0])], env=clean_env())
+    step("the wheel installs into a fresh virtual environment", rc == 0, out.strip().splitlines()[-1] if out.strip() else "")
+    if rc != 0:
+        return
+    rc, out = run([command, "demo", "--case", "good", "--case", "dirty-tree", "--case", "gate"], env=clean_env(), cwd=tmp)
+    step("`seaworthy demo` runs from the installed wheel", rc == 0, out.strip().splitlines()[-1] if out.strip() else "no output")
+
+
+def guard_step(tmp, repo, state, step):
+    """The argv guard holds for `gh` and for any `gh-*` wrapper: a write is refused before anything runs, a read is not."""
+    cases = [("gh-wrapper", ["workflow", "run", "x"], True), ("gh-wrapper", ["api", "-X", "POST", "repos/o/r/x"], True),
+             ("gh-wrapper", ["pr", "view", "1"], False), ("gh", ["workflow", "run", "x"], True)]
+    checks = [{"id": "c%d" % i, "check": "external", "rationale": "smoke", "params": {"argv": [tool] + args}}
+              for i, (tool, args, _) in enumerate(cases)]
+    path = os.path.join(tmp, "guard.json")
+    with open(path, "w") as fh:
+        json.dump(dict(PROFILE, name="guard", checks=checks), fh)
+    _, out, _ = cli("run", path, "--repo", repo, "--state", state, "--json")
+    try:
+        rows = {r["id"]: r for r in json.loads(out)["checks"]}
+    except (ValueError, KeyError, TypeError):
+        rows = {}
+    for i, (tool, args, refused) in enumerate(cases):
+        row = rows.get("c%d" % i, {})
+        got = row.get("status") == "error" and "refused" in str(row.get("evidence", ""))
+        step("the guard %s `%s %s`" % ("refuses" if refused else "allows", tool, " ".join(args[:2])), got == refused,
+             "%s: %s" % (row.get("status"), row.get("evidence")))
+
+
+def main():
+    if shutil.which("git") is None:
+        print("smoke needs git on PATH")
+        return 2
+    tmp = tempfile.mkdtemp(prefix="seaworthy-smoke-")
+    failures = 0
+
+    def step(name, ok, note=""):
+        nonlocal failures
+        failures += 0 if ok else 1
+        print("  %-5s %s%s" % ("ok" if ok else "FAIL", name, "  (%s)" % note if note and not ok else ""))
+
+    try:
+        env = dict(os.environ, GIT_AUTHOR_NAME="Smoke", GIT_AUTHOR_EMAIL="smoke@example.invalid",
+                   GIT_COMMITTER_NAME="Smoke", GIT_COMMITTER_EMAIL="smoke@example.invalid")
+        repo = os.path.join(tmp, "repo")
+        os.makedirs(repo)
+        for args in (["init", "-q"], ["commit", "-q", "--allow-empty", "-m", "start"]):
+            subprocess.run(["git"] + args, cwd=repo, env=env, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+        profile = os.path.join(tmp, "smoke.json")
+        with open(profile, "w") as fh:
+            json.dump(PROFILE, fh)
+        state = os.path.join(tmp, "state")
+        rc, out, _ = cli("--version")
+        step("--version prints a version", rc == 0 and out.startswith("seaworthy "), out.strip())
+        rc, out, _ = cli("validate", profile)
+        step("validate accepts the profile (exit 0)", rc == 0, "exit %s" % rc)
+        rc, out, err = cli("run", profile, "--repo", repo, "--state", state, "--json")
+        try:
+            report = json.loads(out)
+        except ValueError:
+            report = {}
+        step("a clean repository passes (exit 0, JSON, verdict PASS)", rc == 0 and report.get("verdict") == "PASS", "exit %s %s" % (rc, err.strip()[:80]))
+        with open(os.path.join(repo, "stray.txt"), "w") as fh:
+            fh.write("x\n")
+        rc, out, _ = cli("run", profile, "--repo", repo, "--state", state, "--json")
+        step("a stray file fails (exit 3)", rc == 3, "exit %s" % rc)
+        guard_step(tmp, repo, state, step)
+        rc, _, _ = cli("run", os.path.join(tmp, "missing.json"), "--repo", repo)
+        step("a missing profile is a bad spec (exit 2)", rc == 2, "exit %s" % rc)
+        rc, out, _ = cli("demo", "--case", "good", "--case", "dirty-tree")
+        release_scan(tmp, env, step)
+        self_audit(tmp, step)
+        merged_check(tmp, env, step)
+        step("the demo cases behave as stated", rc == 0, out.strip().splitlines()[-1] if out.strip() else "no output")
+        link = os.path.join(tmp, "on-path", "seaworthy")
+        os.makedirs(os.path.dirname(link))
+        try:
+            os.symlink(BIN, link)
+        except (OSError, NotImplementedError, AttributeError):
+            print("  skip  launcher through a symlink: this system cannot make one here")
+        else:
+            rc, out = run([sys.executable, link, "--version"], env=clean_env())
+            step("the launcher works through a symlink", rc == 0 and out.startswith("seaworthy "), out.strip().splitlines()[-1] if out.strip() else "")
+        wheel_demo(tmp, step)
+    finally:
+        shutil.rmtree(tmp, ignore_errors=True)
+    print("smoke: %s" % ("all steps behaved as stated" if not failures else "%d step(s) failed" % failures))
+    return 0 if not failures else 1
+
+
+if __name__ == "__main__":
+    sys.exit(main())

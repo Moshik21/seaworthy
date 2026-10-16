@@ -1,0 +1,56 @@
+{
+ "schema": "seaworthy.fixtures",
+ "schema_version": "1.0",
+ "entries": [
+  {
+   "kind": "run",
+   "host": "builder",
+   "argv": [
+    "node",
+    "--version"
+   ],
+   "rc": 0,
+   "stdout": "v24.9.0"
+  },
+  {
+   "kind": "run",
+   "host": "builder",
+   "argv": [
+    "echo",
+    "seaworthy-ok"
+   ],
+   "rc": 0,
+   "stdout": "seaworthy-ok\n"
+  },
+  {
+   "kind": "run",
+   "argv": [
+    "gh",
+    "api",
+    "repos/actions/runner-images/releases?per_page=60"
+   ],
+   "rc": 0,
+   "stdout_file": "releases-current.json"
+  },
+  {
+   "kind": "run",
+   "argv": [
+    "gh",
+    "api",
+    "repos/actions/runner-images/issues?labels=Announcement&state=open&per_page=50"
+   ],
+   "rc": 0,
+   "stdout_file": "announcements-none.json"
+  },
+  {
+   "kind": "run",
+   "argv": [
+    "gh",
+    "api",
+    "repos/demo-owner/demo-app/actions/workflows?per_page=100"
+   ],
+   "rc": 0,
+   "stdout_file": "workflows-disabled.json"
+  }
+ ]
+}

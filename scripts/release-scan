@@ -1,0 +1,175 @@
+#!/usr/bin/env python3
+"""One-command pre-release scan: the working tree plus the whole git history.
+
+    scripts/release-scan [--denylist FILE] [--allow NAME_OR_EMAIL ...] [PATH]
+
+Runs two scans and prints counts and kinds only, never the matching content (a scan report is something people paste
+into issues and chats, so it must not leak what it finds). Exit status 0 when both are clean, 1 on any finding, 2 when
+a scan could not run (a scan that did not run is never reported as clean).
+
+1. The tree: runs scripts/self-audit on PATH (default: this repository), with --denylist FILE when given.
+2. The history, over every ref (branches, remote branches, tags, notes, anything under refs/):
+   - author and committer names and e-mail addresses that match none of the --allow values;
+   - home paths and secret or token shapes (the same patterns as the self-audit) in lines that a commit added, whether
+     or not they are still in the tree.
+
+--allow is repeated, and each value is a name or an e-mail address, matched whole and case-insensitively; `*` and `?`
+match any text, so `*@users.noreply.github.com` allows that whole domain. Without any --allow, every author and
+committer is a finding. The denylist applies to the tree only. Merge commits are scanned against each parent, so a line
+that a merge introduced (an evil merge or a conflict resolution) is found, and is counted once per parent it is new
+to: the counts are a guide, only the exit status and the kinds are authoritative. Standard library only.
+"""
+import argparse
+import fnmatch
+import importlib.util
+import re
+import subprocess
+import sys
+from collections import Counter
+from importlib.machinery import SourceFileLoader
+from pathlib import Path
+
+HERE = Path(__file__).resolve().parent
+AUDIT = HERE / "self-audit"
+AUDIT_LINE = re.compile(r"^.+?:\d+: (.+?): ")
+COMMIT_MARK = "\x01"
+
+
+def load_audit():
+    """The self-audit's own patterns, so the two scans can never disagree about what a token or a home path is."""
+    spec = importlib.util.spec_from_loader("self_audit", SourceFileLoader("self_audit", str(AUDIT)))
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def git(root, *args):
+    return subprocess.run(["git", "-C", str(root)] + list(args), stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                          universal_newlines=True, encoding="utf-8", errors="replace")
+
+
+def scan_tree(root, denylist):
+    cmd = [sys.executable, str(AUDIT), str(root)] + (["--denylist", denylist] if denylist else [])
+    run = subprocess.run(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True,
+                         encoding="utf-8", errors="replace")
+    if run.returncode not in (0, 1):
+        return None, "self-audit did not run (exit %d)" % run.returncode
+    kinds = Counter()
+    for line in run.stdout.splitlines():
+        m = AUDIT_LINE.match(line)
+        if m:
+            kinds[m.group(1)] += 1
+    if run.returncode == 1 and not kinds:
+        kinds["unclassified"] += 1
+    scanned = re.search(r"(\d+) files scanned", run.stdout)
+    return (kinds, int(scanned.group(1)) if scanned else 0), None
+
+
+def allowed(value, patterns):
+    value = value.lower()
+    return any(fnmatch.fnmatchcase(value, p) for p in patterns)
+
+
+def scan_identities(root, patterns):
+    """Count author and committer names and e-mails off the allow list: per kind, hits and distinct commits."""
+    run = git(root, "log", "--all", "--format=%H%x00%an%x00%ae%x00%cn%x00%ce")
+    if run.returncode != 0:
+        return None, "git log failed (exit %d)" % run.returncode
+    labels = ("author name", "author e-mail", "committer name", "committer e-mail")
+    hits, commits = Counter(), {label: set() for label in labels}
+    for line in run.stdout.splitlines():
+        fields = line.split("\x00")
+        if len(fields) != 5:
+            continue
+        for label, value in zip(labels, fields[1:]):
+            if not allowed(value, patterns):
+                hits[label] += 1
+                commits[label].add(fields[0])
+    return {label: (hits[label], len(commits[label])) for label in labels if hits[label]}, None
+
+
+def scan_added_lines(root, audit):
+    """Count home paths and token shapes in every line any commit added: per kind, hits and distinct commits."""
+    secrets = [(kind, re.compile(pat)) for kind, pat in audit.SECRETS]
+    paths = list(audit.PATHS)
+    proc = subprocess.Popen(["git", "-C", str(root), "log", "--all", "--root", "-m", "-p", "-U0", "--no-color", "--no-ext-diff",
+                             "--no-textconv", "--format=" + COMMIT_MARK + "%H"], stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE, universal_newlines=True, encoding="utf-8", errors="replace")
+    hits, commits = Counter(), {}
+    commit, in_hunk = None, False
+    for line in proc.stdout:
+        line = line.rstrip("\n")
+        if line.startswith(COMMIT_MARK):
+            commit, in_hunk = line[1:], False
+        elif line.startswith("diff "):
+            in_hunk = False
+        elif line.startswith("@@"):
+            in_hunk = True
+        elif in_hunk and line.startswith("+"):
+            text = line[1:]
+            kinds = {kind for kind, pat in secrets if pat.search(text)}
+            kinds |= {kind for kind, pat in paths if pat.search(text)}
+            for kind in kinds:
+                hits[kind] += 1
+                commits.setdefault(kind, set()).add(commit)
+    proc.stderr.read()
+    if proc.wait() != 0:
+        return None, "git log failed (exit %d)" % proc.returncode
+    return {kind: (n, len(commits[kind])) for kind, n in sorted(hits.items())}, None
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.split("\n")[0])
+    ap.add_argument("path", nargs="?", default=str(HERE.parent), help="the repository to scan (default: this one)")
+    ap.add_argument("--denylist", help="file of names that must not appear in the tree (kept outside the repository)")
+    ap.add_argument("--allow", action="append", default=[], metavar="NAME_OR_EMAIL",
+                    help="an author or committer name or e-mail that may appear in history (repeatable; * and ? match)")
+    args = ap.parse_args()
+    root = Path(args.path).resolve()
+    if args.denylist and not Path(args.denylist).is_file():
+        print("release-scan: the denylist is not a readable file")
+        return 2
+    if git(root, "rev-parse", "--git-dir").returncode != 0:
+        print("release-scan: %s is not a git repository" % root.name)
+        return 2
+    patterns = [a.lower() for a in args.allow]
+    audit = load_audit()
+    total = 0
+
+    tree, err = scan_tree(root, args.denylist)
+    if err:
+        print("release-scan: tree: %s" % err)
+        return 2
+    kinds, scanned = tree
+    print("tree (scripts/self-audit%s): %d files scanned, %d finding(s)"
+          % (", with denylist" if args.denylist else "", scanned, sum(kinds.values())))
+    for kind, n in sorted(kinds.items()):
+        print("  %s: %d" % (kind, n))
+    total += sum(kinds.values())
+
+    count = git(root, "rev-list", "--all", "--count").stdout.strip() or "0"
+    print("history (all refs, %s commit(s)):" % count)
+    if not patterns:
+        print("  no --allow given: every author and committer name and e-mail counts as a finding")
+    identities, err = scan_identities(root, patterns)
+    if err:
+        print("release-scan: history: %s" % err)
+        return 2
+    added, err = scan_added_lines(root, audit)
+    if err:
+        print("release-scan: history: %s" % err)
+        return 2
+    for kind, (n, c) in identities.items():
+        print("  %s not on the allow list: %d in %d commit(s)" % (kind, n, c))
+        total += n
+    for kind, (n, c) in added.items():
+        print("  added line, %s: %d in %d commit(s)" % (kind, n, c))
+        total += n
+    if not identities and not added:
+        print("  no findings")
+    print("release-scan: %d finding(s)%s" % (total, "" if total else ": clean"))
+    return 1 if total else 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

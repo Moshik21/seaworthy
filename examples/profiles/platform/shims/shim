@@ -1,0 +1,130 @@
+#!/bin/sh
+# One stand-in for the vendors' command line tools, used only by prove.py. It is copied under the names xcrun,
+# security, spctl, gh and ssh into a throwaway directory that is put on PATH. What it answers is chosen by small scenario
+# files next to it, so nothing here is real: no Apple, GitHub, Azure or ssh endpoint is ever contacted. It uses only
+# shell builtins, logs every call to calls.log, and exits 99 on any call it was not written to answer, so a check that
+# tried to submit, create or sign anything would be caught.
+D=${0%/*}
+tool=${0##*/}
+echo "$tool $*" >> "$D/calls.log"
+
+emit() {
+    while IFS= read -r line || [ -n "$line" ]; do printf '%s\n' "$line"; done < "$D/$1"
+}
+scenario() {   # scenario FILE DEFAULT
+    if [ -f "$D/$1" ]; then read -r v < "$D/$1"; printf '%s' "$v"; else printf '%s' "$2"; fi
+}
+refuse() { echo "shim: unexpected $tool call: $*" >&2; exit 99; }
+
+case "$tool" in
+xcrun)
+    case "$*" in
+    "--version") echo "xcrun version 1"; exit 0 ;;
+    "notarytool history "*) ;;
+    "stapler validate "*)
+        if [ "$(scenario xcrun.stapler ok)" = "none" ]; then echo "The file does not have a ticket stapled to it." >&2; exit 65; fi
+        echo "The validate action worked!"; exit 0 ;;
+    *) refuse "$@" ;;
+    esac
+    case "$(scenario xcrun.mode ok)" in
+    ok) printf '{"history":[{"id":"00000000-0000-0000-0000-000000000001","status":"Accepted"},{"id":"00000000-0000-0000-0000-000000000002","status":"Accepted"}]}\n' ;;
+    no-profile) echo "Error: No Keychain password item found for profile: example-notary" >&2; exit 1 ;;
+    wrong-team) echo "Error: HTTP status code: 403. Invalid or inaccessible developer team ID. Verify the team ID and that the account has access." >&2; exit 1 ;;
+    bad-credential) echo "Error: HTTP status code: 401. Invalid credentials. Username or password is incorrect." >&2; exit 1 ;;
+    agreement) echo "Error: HTTP status code: 403. A required agreement is missing or has expired. This request requires an in-effect agreement that has not been signed or has expired." >&2; exit 1 ;;
+    garbage) echo "this is not json" ;;
+    esac
+    ;;
+spctl)
+    case "$1" in
+    --assess)
+        if [ "$(scenario spctl.mode accepted)" = "rejected" ]; then echo "rejected" >&2; exit 3; fi
+        echo "accepted" >&2 ;;
+    *) refuse "$@" ;;
+    esac
+    ;;
+security)
+    case "$1" in
+    find-identity)
+        echo "  Policy: Code Signing"
+        echo "  Matching identities"
+        case "$(scenario security.identity good)" in
+        good) echo '  1) 0123ABCD "Developer ID Application: Example Corp (TEST000000)"' ;;
+        expired-flagged) echo '  1) 0123ABCD "Developer ID Application: Example Corp (TEST000000)" (CSSMERR_TP_CERT_EXPIRED)' ;;
+        missing) echo '  1) 4567EF01 "Developer ID Application: Someone Else (OTHER00000)"' ;;
+        esac
+        echo "     1 identities found"
+        ;;
+    find-certificate) emit cert.pem ;;
+    *) refuse "$@" ;;
+    esac
+    ;;
+gh)
+    case "$*" in
+    "secret list "*)
+        case "$(scenario gh.secrets ok)" in
+        ok) printf 'GH_TOKEN\t2026-10-01T00:00:00Z\nSIGNING_PROFILE\t2026-10-01T00:00:00Z\n' ;;
+        missing) printf 'SIGNING_PROFILE\t2026-10-01T00:00:00Z\n' ;;
+        forbidden) echo "HTTP 403: Resource not accessible by personal access token" >&2; exit 1 ;;
+        esac
+        ;;
+    "api repos/"*"/releases?per_page=100") emit releases.json ;;
+    "api repos/"*"/immutable-releases")
+        case "$(scenario gh.immutable on)" in
+        on) echo '{"enabled":true,"enforced_by_owner":false}' ;;
+        off) echo '{"enabled":false,"enforced_by_owner":false}' ;;
+        error) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+        esac
+        ;;
+    *) refuse "$@" ;;
+    esac
+    ;;
+ssh)
+    while [ "$1" = "-o" ]; do shift 2; done
+    shift                                   # the host alias
+    # a login profile on the host that complains about some other tool, as a real Windows profile can
+    case "$(scenario ssh.noise none)" in
+    fnm) echo "fnm : The term 'fnm' is not recognized as the name of a cmdlet, function, script file, or operable program." >&2 ;;
+    fnm-only) echo "fnm : The term 'fnm' is not recognized as the name of a cmdlet, function, script file, or operable program." >&2; exit 1 ;;
+    esac
+    if [ "$(scenario ssh.mode up)" = "down" ]; then
+        echo "ssh: connect to host signer port 22: Connection timed out" >&2; exit 255
+    fi
+    if [ "$(scenario ssh.az present)" = "missing" ]; then
+        case "$*" in
+        *get-access-token*|*"role assignment"*) echo "'az' is not recognized as an internal or external command, operable program or batch file." >&2; exit 1 ;;
+        esac
+    fi
+    case "$*" in
+    *get-access-token*)
+        case "$(scenario ssh.token ok)" in
+        ok) echo "2026-10-09 18:00:00.000000" ;;
+        not-logged-in) echo "ERROR: Please run 'az login' to setup account." >&2; exit 1 ;;
+        esac
+        ;;
+    *"role assignment list"*)
+        case "$(scenario ssh.roles signer)" in
+        signer) echo '[{"roleDefinitionName":"Artifact Signing Certificate Profile Signer"},{"roleDefinitionName":"Reader"}]' ;;
+        none) echo '[{"roleDefinitionName":"Reader"}]' ;;
+        forbidden) echo "(AuthorizationFailed) The client does not have authorization to perform action Microsoft.Authorization/roleAssignments/read over scope." >&2; exit 1 ;;
+        esac
+        ;;
+    *Get-Module*)
+        case "$(scenario ssh.module visible)" in
+        visible) echo "0.5.8" ;;
+        duplicate) echo "0.5.8,0.5.0" ;;
+        absent) ;;
+        esac
+        ;;
+    *VersionInfo*)
+        v=$(scenario ssh.signtool 10.0.26100.1)
+        if [ "$v" = "missing" ]; then echo "Get-Item : Cannot find path because it does not exist." >&2; exit 1; fi
+        echo "$v (WinBuild.160101.0800)"
+        ;;
+    *"Get-Content -Raw -LiteralPath"*metadata*) emit metadata.json ;;
+    *"Get-Content -Raw -LiteralPath"*) emit signing-script.txt ;;
+    *) refuse "$@" ;;
+    esac
+    ;;
+*) refuse "$@" ;;
+esac

@@ -1,0 +1,133 @@
+// Seaworthy profile for a desktop app built with Electron, signed on two platforms and released through
+// a draft-then-promote flow. Copy it, set the params, and edit the checks until it matches YOUR release process.
+// Every check says why it is here (rationale). Delete a check when the incident behind it can no longer happen.
+{
+  "schema": "seaworthy.profile",
+  "schema_version": "1.0",
+  "name": "electron-desktop",
+  "description": "Neutral example: source frozen, tools pinned, build host up, hosted budget safe, platform checks ready to enable.",
+
+  // Values the checks refer to as ${name}. Override on the command line: --set version=1.4.0
+  "params": {
+    "version": "1.4.0",
+    "release_branch": "main",
+    "builds_repo": "owner/name",
+    "billing_user": "owner"
+  },
+
+  // Named runners. A check with "host": "windows-builder" runs its commands through this argv prefix.
+  // Use key-based ssh (BatchMode) so a missing key fails fast instead of hanging on a prompt.
+  "hosts": {
+    "windows-builder": {
+      "os": "windows",
+      "argv_prefix": ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "builder-alias"]
+    }
+  },
+
+  // The hosted-run budget. Rates are USD per minute for standard hosted runners; check your plan before trusting them.
+  "budget": {
+    "currency": "USD",
+    "cap": 10.0,
+    "max_runs": 2,
+    "window": "all",
+    "rates": {"linux": 0.006, "windows": 0.010, "macos": 0.062},
+    "planned": [
+      {"name": "linux release job", "os": "linux", "timeout_min": 60},
+      {"name": "windows release job", "os": "windows", "timeout_min": 180}
+    ]
+  },
+
+  // The receipt a hosted-dispatch wrapper must present. Point hmac_key_file at a file only the release owner can read.
+  "receipt": {"max_age_hours": 12},
+
+  // Failures that a re-run cannot fix. After one of these at a SHA, the gate wants a new SHA and a new PASS.
+  "deterministic_failures": [
+    {"id": "notary-agreement", "pattern": "required agreement is missing or has expired", "why": "a person must accept the agreement"},
+    {"id": "wrong-team", "pattern": "Invalid or inaccessible developer team", "why": "the credential belongs to another team"},
+    {"id": "heap-oom", "pattern": "JavaScript heap out of memory", "why": "the same SHA hits the same heap limit"}
+  ],
+
+  "waivers": {"allowed_by": []},
+
+  "checks": [
+    {"id": "source-frozen", "check": "git.source_frozen", "required": true,
+     "params": {"branch": "${release_branch}", "tag": "v${version}", "remote_mode": "tracking"},
+     "rationale": "A hosted run that builds a SHA other than the one you proved wastes the run and ships the wrong bytes."},
+
+    {"id": "clean-checkout", "check": "git.clean_checkout", "required": true,
+     "rationale": "A dirty or half-merged checkout means the local proof and the release disagree."},
+
+    {"id": "version-and-notes", "check": "release.version_notes", "required": true,
+     "params": {"version": "${version}", "package_json": "package.json", "notes": "docs/RELEASE_NOTES_{X_Y_Z}.md"},
+     "rationale": "A forgotten version bump or notes file is found by the release script after minutes have been spent."},
+
+    {"id": "workflow-hygiene", "check": "workflow.hygiene", "required": true,
+     "params": {"release_workflows": ["release.yml"], "max_timeout": {"windows": 180, "macos": 120, "linux": 60}},
+     "rationale": "A job without timeout-minutes can run 360 minutes; a macOS minute costs about ten Linux minutes."},
+
+    {"id": "tool-pins-local", "check": "tools.pins", "required": true,
+     "params": {"tools": [
+       {"name": "node", "argv": ["node", "--version"], "expect": "24.*"},
+       {"name": "pnpm", "argv": ["pnpm", "--version"], "expect": "11.*"}
+     ]},
+     "rationale": "A release proven on one toolchain and built on another is not the release you tested."},
+
+    {"id": "tool-pins-builder", "check": "tools.pins", "host": "windows-builder", "cost": "cheap-network", "required": true,
+     "params": {"tools": [{"name": "node", "argv": ["node", "--version"], "expect": "24.*"}]},
+     "rationale": "The signing host builds the Windows artifacts; its tools must match too."},
+
+    {"id": "builder-reachable", "check": "hosts.reachable", "cost": "cheap-network", "required": true,
+     "params": {"host": "windows-builder", "timeout_s": 5,
+                "probes": [{"name": "ssh answers", "argv": ["echo", "seaworthy-ok"], "expect": "seaworthy-ok"}]},
+     "rationale": "An unreachable build host forces the paid hosted path; find out before the release starts."},
+
+    {"id": "runner-image-drift", "check": "github.runner_image", "cost": "cheap-network", "required": false,
+     "advisory_reason": "A changed image is a signal to read the image notes, not proof the release will fail; images are rebuilt weekly, so blocking on every change would block every release.",
+     "params": {"mode": "drift"},
+     "rationale": "Hosted images are rebuilt about weekly; a label you pinned still moves."},
+
+    {"id": "runner-image-migration", "check": "github.runner_image", "cost": "cheap-network", "required": true,
+     "params": {"mode": "migration"},
+     "rationale": "A runner label under an open migration or retirement announcement changes the toolchain under you."},
+
+    {"id": "ordinary-ci-disabled", "check": "github.workflows_disabled", "cost": "cheap-network", "required": true,
+     "params": {"repo": "${builds_repo}", "files": ["ci.yml"]},
+     "rationale": "A workflow that triggers on every push spends the release-only budget on ordinary development."},
+
+    {"id": "hosted-budget", "check": "budget.hosted_spend", "required": true,
+     "params": {"warn_at": 0.8},
+     "rationale": "The budget is for releases only, and a failed run must not be re-run just to retry."},
+
+    // Platform checks. Disabled here because they need your names; fill them in and set "enabled": true for what your release does.
+    // Apple checks run on the Mac that signs (--scope mac), Windows checks on the signing machine (--scope windows), see docs/checks.md.
+    {"id": "notary-credentials", "check": "apple.notary_credentials", "cost": "cheap-network", "enabled": false, "scope": "mac",
+     "params": {"keychain_profile": "your-notary-profile"},
+     "rationale": "Missing keychain profile or wrong team fails after the build."},
+    {"id": "notary-agreement", "check": "apple.notary_agreement", "cost": "cheap-network", "enabled": false, "scope": "mac", "waivable": true,
+     "params": {"keychain_profile": "your-notary-profile", "confirmed_by": "account holder name", "confirmed_on": "2026-01-31"},
+     "rationale": "An expired agreement fails every submission until a person accepts it."},
+    {"id": "developer-id-identity", "check": "apple.developer_id_identity", "enabled": false, "scope": "mac",
+     "params": {"identity": "Developer ID Application: Your Name (TEAMID)", "min_days": 30},
+     "rationale": "An expired or old-issuer certificate stops signing."},
+    {"id": "notarization-configured", "check": "apple.notarization_configured", "enabled": false, "scope": "mac",
+     "params": {"config": ["electron-builder.yml"]},
+     "rationale": "With no credentials a build can finish un-notarized."},
+    {"id": "windows-signing-role", "check": "windows.signing_role", "enabled": false, "scope": "windows", "host": "windows-builder", "cost": "cheap-network",
+     "params": {"assignee": "object-id-of-the-signing-identity", "scope": "/subscriptions/ID/resourceGroups/NAME/providers/Microsoft.CodeSigning/codeSigningAccounts/ACCOUNT/certificateProfiles/PROFILE"},
+     "rationale": "A token proves identity, not permission to sign."},
+    {"id": "windows-signing-setup", "check": "windows.signing_setup", "enabled": false, "scope": "windows", "host": "windows-builder", "cost": "cheap-network",
+     "params": {"module": "TrustedSigning"},
+     "rationale": "Module visibility and endpoint region failures show up only at signing time."},
+    {"id": "secrets-present", "check": "github.secrets_present", "enabled": false, "cost": "cheap-network",
+     "params": {"repo": "${builds_repo}", "names": ["EXAMPLE_TOKEN"]},
+     "rationale": "A missing secret fails the hosted job after it has started billing."},
+    {"id": "draft-release-state", "check": "release.draft_state", "enabled": false, "cost": "cheap-network",
+     "params": {"repo": "${builds_repo}", "tag": "v${version}", "asset_count": 3},
+     "rationale": "A draft endpoint 404 wastes a hosted run."},
+
+    // A real rehearsal: run your own release-policy tests and bounded typecheck. Local-heavy, so it runs last.
+    {"id": "local-rehearsal", "check": "external", "cost": "local-heavy", "enabled": false, "required": true, "timeout_s": 1800,
+     "params": {"argv": ["pnpm", "run", "typecheck"]},
+     "rationale": "The hosted run should not be the first time the release tests and typecheck run at this SHA."}
+  ]
+}

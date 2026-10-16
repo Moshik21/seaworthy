@@ -1,0 +1,66 @@
+// The platform checks of Seaworthy, one of each, with neutral names. This is the profile prove.py runs against
+// fake command line tools (shims). It is also the shape to copy: replace the example names with yours.
+//
+// The Apple checks run on the Mac that signs; the Windows checks run on the signing machine over the "signer" host (an
+// ssh alias, key-based, BatchMode); the GitHub checks need `gh` signed in with access to the repositories.
+// A check that cannot run on the machine you are on says "cannot check here" (unknown), which blocks: run each scope
+// where its tools are (--scope mac, --scope windows), or run everything from the Mac that can also ssh to the signer.
+{
+  "schema": "seaworthy.profile",
+  "schema_version": "1.0",
+  "name": "platform-example",
+  "description": "Every platform check once, on a made-up app: notarization, Developer ID, Windows signing, secrets, draft release.",
+
+  "params": {
+    "version": "1.4.0",
+    "keychain_profile": "example-notary",
+    "pwsh": "pwsh",
+    "agreement_confirmed_by": "",
+    "agreement_confirmed_on": "",
+    "mac_identity": "Developer ID Application: Example Corp (TEST000000)",
+    "signing_assignee": "00000000-0000-0000-0000-000000000000",
+    "signing_scope": "/subscriptions/00000000-0000-0000-0000-000000000000/resourceGroups/example/providers/Example/profiles/example",
+    "release_id": 0,
+    "immutable": false
+  },
+
+  "hosts": {
+    "signer": {"os": "windows", "argv_prefix": ["ssh", "-o", "BatchMode=yes", "-o", "ConnectTimeout=5", "signer"]}
+  },
+
+  "checks": [
+    {"id": "notary-credentials", "check": "apple.notary_credentials", "cost": "cheap-network", "scope": "mac",
+     "params": {"keychain_profile": "${keychain_profile}", "artifacts": ["dist/Example-1.4.0.dmg"]},
+     "rationale": "A missing keychain profile or the wrong team fails only after the build, at notarization. At stage publish the artifacts are already notarized: the check then shows their ticket instead."},
+
+    {"id": "notary-agreement", "check": "apple.notary_agreement", "cost": "cheap-network", "scope": "mac", "waivable": true,
+     "params": {"keychain_profile": "${keychain_profile}", "confirmed_by": "${agreement_confirmed_by}", "confirmed_on": "${agreement_confirmed_on}"},
+     "rationale": "An expired agreement refuses every submission until the Account Holder accepts it; a retry never helps."},
+
+    {"id": "developer-id-identity", "check": "apple.developer_id_identity", "scope": "mac",
+     "params": {"identity": "${mac_identity}", "min_days": 30},
+     "rationale": "An expired certificate, or one under the retiring original authority, stops signing."},
+
+    {"id": "notarization-configured", "check": "apple.notarization_configured", "scope": "mac",
+     "params": {"config": ["electron-builder.yml"]},
+     "rationale": "With no credential set the builder skips notarization and a green build ships un-notarized."},
+
+    {"id": "windows-signing-role", "check": "windows.signing_role", "host": "signer", "cost": "cheap-network", "scope": "windows",
+     "params": {"az": "az", "assignee": "${signing_assignee}", "scope": "${signing_scope}"},
+     "rationale": "A token proves identity, not permission to sign; the role assignment is the permission."},
+
+    {"id": "windows-signing-setup", "check": "windows.signing_setup", "host": "signer", "cost": "cheap-network", "scope": "windows",
+     "params": {"pwsh": "${pwsh}", "module_version": "0.5.8", "signtool": "C:\\signing\\signtool.exe", "metadata_file": "C:\\signing\\metadata.json",
+                "endpoint": "https://eus.codesigning.azure.net", "timestamp_file": "C:\\signing\\sign.ps1"},
+     "rationale": "The module can be invisible to PowerShell 7 and a wrong endpoint region 403s; both show only at signing time."},
+
+    {"id": "secrets-present", "check": "github.secrets_present", "cost": "cheap-network",
+     "params": {"repo": "example-org/example-app", "names": ["GH_TOKEN", "SIGNING_PROFILE"]},
+     "rationale": "A missing secret fails the hosted job after it has started billing."},
+
+    {"id": "draft-release-state", "check": "release.draft_state", "cost": "cheap-network",
+     "params": {"repo": "example-org/example-releases", "tag": "v${version}", "release_id": "${release_id}", "asset_count": 3,
+                "assets": ["app-mac.dmg", "app-win.exe", "app-linux.AppImage"], "notes_file": "RELEASE_NOTES_{X_Y_Z}.md", "immutable_releases": "${immutable}"},
+     "rationale": "A draft lookup that returns 404 wastes a hosted run; the draft, its assets and its notes can be read first."}
+  ]
+}

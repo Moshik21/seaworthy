@@ -1,0 +1,23 @@
+// The smallest useful Seaworthy profile: three checks, no network, no platform tools. Copy it, rename it, then add
+// the checks your own release needs (`seaworthy checks` lists them). It passes when HEAD is the SHA you give with
+// --sha, that SHA is the last-fetched tip of origin/main (change `branch` or `remote` in source-frozen's params if
+// yours differ), and the working tree is clean.
+{
+  "schema": "seaworthy.profile",
+  "schema_version": "1.0",
+  "name": "minimal",
+  "description": "Three free checks: source frozen, clean checkout, hosted budget within its cap.",
+  "budget": {
+    "currency": "USD", "cap": 10.0, "max_runs": 2, "window": "all",
+    "rates": {"linux": 0.006},
+    "planned": [{"name": "linux release", "os": "linux", "timeout_min": 60}]
+  },
+  "checks": [
+    {"id": "source-frozen", "check": "git.source_frozen",
+     "rationale": "The hosted run must build the SHA that was proven."},
+    {"id": "clean-checkout", "check": "git.clean_checkout",
+     "rationale": "A dirty tree means the proof and the release differ."},
+    {"id": "hosted-budget", "check": "budget.hosted_spend",
+     "rationale": "A release should not start a hosted run the budget cannot cover."}
+  ]
+}

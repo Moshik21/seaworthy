@@ -1,0 +1,7 @@
+__pycache__/
+.venv/
+*.pyc
+dist/
+.seaworthy/
+build/
+*.egg-info/

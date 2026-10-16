@@ -1,0 +1,12 @@
+{
+ "workflows": [
+  {
+   "path": ".github/workflows/ci.yml",
+   "state": "disabled_manually"
+  },
+  {
+   "path": ".github/workflows/release.yml",
+   "state": "active"
+  }
+ ]
+}
